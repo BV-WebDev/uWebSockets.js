@@ -145,7 +145,7 @@ class NativeString {
     bool invalid = false;
 
     // Static thread-local state shared by all NativeString instances on this thread
-    // Pool size must be a multiple of 8 to guarantee pool_offset <= pool.size()
+    // Pool size must be a multiple of 8 because pool_offset is 8-byte aligned
     inline static thread_local std::vector<char> pool = std::vector<char>(128 * 1024);
     inline static thread_local size_t pool_offset = 0;
     inline static thread_local int ref_count = 0;
@@ -162,6 +162,10 @@ class NativeString {
         pool_offset += (size + 7) & ~size_t{7};
     }
 
+    static void clearPool() {
+        pool_offset = 0;
+    }
+
 public:
     NativeString(const NativeString&) = delete;
     NativeString& operator=(const NativeString&) = delete;
@@ -170,7 +174,7 @@ public:
 
     NativeString(Isolate *isolate, const Local<Value> &value) {
         if (ref_count == 0) {
-            pool_offset = 0; // Reset the "stack" when entering the first scope
+            clearPool();
         }
         ref_count++;
 
@@ -179,20 +183,20 @@ public:
             length = 0;
         } else if (value->IsString()) {
             Local<String> string = Local<String>::Cast(value);
-
+            const size_t stringLength = static_cast<size_t>(string->Length());
             size_t allocSize;
 
-            // Get the worst case allocation size
+            // Get the worst-case allocation size
             if (string->IsOneByte()) { // Latin-1 -> UTF-8
-                allocSize = 2 * static_cast<size_t>(string->Length());
+                allocSize = 2 * stringLength;
             } else { // UTF-16 -> UTF-8
-                allocSize = 3 * static_cast<size_t>(string->Length());
+                allocSize = 3 * stringLength;
             }
 
             // Allocate data
             data = getPoolPtr(allocSize);
             if (data == nullptr) {
-                // Worst case size can't be pooled: calculate the exact size
+                // Worst-case size can't be pooled: calculate the exact size
                 #if (V8_MAJOR_VERSION == 14)
                     allocSize = string->Utf8LengthV2(isolate);
                 #else
@@ -211,7 +215,7 @@ public:
                 }
             }
 
-            // Convert the string to UTF-8 into data and get the real length
+            // Convert to UTF-8 into data and get the number of bytes written
             #if (V8_MAJOR_VERSION == 14)
                 length = string->WriteUtf8V2(isolate, data, allocSize);
             #else
@@ -222,19 +226,17 @@ public:
             }
         } else if (value->IsArrayBufferView()) { /* DataView or TypedArray */
             Local<ArrayBufferView> arrayBufferView = Local<ArrayBufferView>::Cast(value);
-            auto contents = arrayBufferView->Buffer()->GetBackingStore();
+            Local<ArrayBuffer> arrayBuffer = arrayBufferView->Buffer();
             length = arrayBufferView->ByteLength();
-            data = (char *) contents->Data() + arrayBufferView->ByteOffset();
+            data = (char *) arrayBuffer->Data() + arrayBufferView->ByteOffset();
         } else if (value->IsArrayBuffer()) {
             Local<ArrayBuffer> arrayBuffer = Local<ArrayBuffer>::Cast(value);
-            auto contents = arrayBuffer->GetBackingStore();
-            length = contents->ByteLength();
-            data = (char *) contents->Data();
+            length = arrayBuffer->ByteLength();
+            data = (char *) arrayBuffer->Data();
         } else if (value->IsSharedArrayBuffer()) {
             Local<SharedArrayBuffer> arrayBuffer = Local<SharedArrayBuffer>::Cast(value);
-            auto contents = arrayBuffer->GetBackingStore();
-            length = contents->ByteLength();
-            data = (char *) contents->Data();
+            length = arrayBuffer->ByteLength();
+            data = (char *) arrayBuffer->Data();
         } else {
             invalid = true;
         }
